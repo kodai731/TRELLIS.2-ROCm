@@ -22,7 +22,7 @@ Original repository: https://github.com/microsoft/TRELLIS.2<br>
 Original README: https://github.com/Mateusz-Dera/TRELLIS.2-ROCm/blob/main/ORGINAL_README.md
 
 > [!Note]
-> Core model generation is functional, but I'm in the process of replacing certain modules. Consequently, features such as the model preview are currently unavailable.
+> Core model generation is functional, but I'm in the process of replacing certain modules. Consequently, features such as the model preview or texturing are currently unavailable.
 
 ### Test platform:
 |Name|Info|
