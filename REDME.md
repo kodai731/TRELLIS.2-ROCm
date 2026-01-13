@@ -4,8 +4,11 @@
 
 ![ROCm](https://img.shields.io/badge/ROCm-7.1.1-red.svg)
 
-This is a fork of TRELLIS.2 adapted to work with ROCm and is used in https://github.com/Mateusz-Dera/ROCm-AI-Installer
-All code was generated automatically using hipify.<br>
+This is a fork of TRELLIS.2 that enables running 3D model generation on AMD GPUs using ROCm.<br>
+The script uses HIPIFY, and most libraries are patched on the fly; therefore, make sure you have the same versions of ROCm and HIPIFY installed.<br>
+If you want a reliable test environment, it is recommended to use a Podman container (https://github.com/Mateusz-Dera/ROCm-AI-Installer
+).
+
 Original repository: https://github.com/microsoft/TRELLIS.2<br>
 Original README: https://github.com/Mateusz-Dera/TRELLIS.2-ROCm/ORIGINAL_README.md
 
