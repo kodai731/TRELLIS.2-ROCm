@@ -266,6 +266,9 @@ echo "Converting CUDA code to ROCm using hipify..."
 find flex_gemm/kernels/cuda -type f \( -name "*.cu" -o -name "*.cpp" -o -name "*.cuh" -o -name "*.h" \) | xargs -I {} hipify-perl {} -inplace
 
 echo "Applying ROCm-specific fixes to FlexGEMM..."
+# Disable TF32 for ROCm (TF32 is NVIDIA-specific, ROCm only supports IEEE)
+sed -i 's/allow_tf32 = True/allow_tf32 = False/g' flex_gemm/kernels/triton/spconv/config.py
+
 # Update setup.py to use CppExtension instead of CUDAExtension
 if [ -f "setup.py" ]; then
     sed -i 's/from torch.utils.cpp_extension import CUDAExtension, BuildExtension/from torch.utils.cpp_extension import CppExtension, BuildExtension/g' setup.py
