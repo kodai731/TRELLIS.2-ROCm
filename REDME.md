@@ -2,6 +2,8 @@
 
 ## Info:
 
+Work in progress!
+
 ![ROCm](https://img.shields.io/badge/ROCm-7.1.1-red.svg)
 
 This is a fork of TRELLIS.2 that enables running 3D model generation on AMD GPUs using ROCm.<br>
