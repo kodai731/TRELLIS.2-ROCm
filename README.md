@@ -8,6 +8,9 @@ The script uses HIPIFY, and most libraries are patched on the fly; therefore, ma
 If you want a reliable test environment, it is recommended to use a Podman container (https://github.com/Mateusz-Dera/ROCm-AI-Installer
 ).
 
+> [!Note]
+> An automatic installer for the script above will also be added.
+
 The script uses <b>nvdiffrast-hip</b> from https://github.com/CalebisGross/TRELLIS-AMD
 
 The script applies patches dynamically:
@@ -22,7 +25,7 @@ Original repository: https://github.com/microsoft/TRELLIS.2<br>
 Original README: https://github.com/Mateusz-Dera/TRELLIS.2-ROCm/blob/main/ORGINAL_README.md
 
 > [!Note]
-> Core model generation is functional, but I'm in the process of replacing certain modules. Consequently, features such as the model preview or texturing are currently unavailable.
+> Core model generation is functional, but I'm in the process of replacing certain modules. Consequently, features such as the model preview or proper texturing are currently unavailable.
 
 ### Test platform:
 |Name|Info|
