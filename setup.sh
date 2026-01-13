@@ -1,139 +1,103 @@
-# Read Arguments
-TEMP=`getopt -o h --long help,new-env,basic,flash-attn,cumesh,o-voxel,flexgemm,nvdiffrast,nvdiffrec -n 'setup.sh' -- "$@"`
+#!/bin/bash
+set -e  # Exit on error
 
-eval set -- "$TEMP"
+# Get the directory where this script is located
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+cd "$SCRIPT_DIR"
 
-HELP=false
-NEW_ENV=false
-BASIC=false
-FLASHATTN=false
-CUMESH=false
-OVOXEL=false
-FLEXGEMM=false
-NVDIFFRAST=false
-NVDIFFREC=false
-ERROR=false
-
-
-if [ "$#" -eq 1 ] ; then
-    HELP=true
-fi
-
-while true ; do
-    case "$1" in
-        -h|--help) HELP=true ; shift ;;
-        --new-env) NEW_ENV=true ; shift ;;
-        --basic) BASIC=true ; shift ;;
-        --flash-attn) FLASHATTN=true ; shift ;;
-        --cumesh) CUMESH=true ; shift ;;
-        --o-voxel) OVOXEL=true ; shift ;;
-        --flexgemm) FLEXGEMM=true ; shift ;;
-        --nvdiffrast) NVDIFFRAST=true ; shift ;;
-        --nvdiffrec) NVDIFFREC=true ; shift ;;
-        --) shift ; break ;;
-        *) ERROR=true ; break ;;
-    esac
-done
-
-if [ "$ERROR" = true ] ; then
-    echo "Error: Invalid argument"
-    HELP=true
-fi
-
-if [ "$HELP" = true ] ; then
-    echo "Usage: setup.sh [OPTIONS]"
-    echo "Options:"
-    echo "  -h, --help              Display this help message"
-    echo "  --new-env               Create a new conda environment"
-    echo "  --basic                 Install basic dependencies"
-    echo "  --flash-attn            Install flash-attention"
-    echo "  --cumesh                Install cumesh"
-    echo "  --o-voxel               Install o-voxel"
-    echo "  --flexgemm              Install flexgemm"
-    echo "  --nvdiffrast            Install nvdiffrast"
-    echo "  --nvdiffrec             Install nvdiffrec"
-    return
-fi
-
-# Get system information
-WORKDIR=$(pwd)
-if command -v nvidia-smi > /dev/null; then
-    PLATFORM="cuda"
-elif command -v rocminfo > /dev/null; then
-    PLATFORM="hip"
-else
-    echo "Error: No supported GPU found"
+# Check if uv is installed
+if ! command -v uv &> /dev/null; then
+    echo "Error: uv is not installed. Please install uv first."
     exit 1
 fi
 
-if [ "$NEW_ENV" = true ] ; then
-    conda create -n trellis2 python=3.10
-    conda activate trellis2
-    if [ "$PLATFORM" = "cuda" ] ; then
-        pip install torch==2.6.0 torchvision==0.21.0 --index-url https://download.pytorch.org/whl/cu124
-    elif [ "$PLATFORM" = "hip" ] ; then
-        pip install torch==2.6.0 torchvision==0.21.0 --index-url https://download.pytorch.org/whl/rocm6.2.4
-    fi
+echo "uv is installed, proceeding..."
+
+# Check if .venv exists and remove it
+if [ -d ".venv" ]; then
+    echo "Removing existing .venv directory..."
+    rm -rf .venv
 fi
 
-if [ "$BASIC" = true ] ; then
-    pip install imageio imageio-ffmpeg tqdm easydict opencv-python-headless ninja trimesh transformers gradio==6.0.1 tensorboard pandas lpips zstandard
-    pip install git+https://github.com/EasternJournalist/utils3d.git@9a4eb15e4021b67b12c460c7057d642626897ec8
-    sudo apt install -y libjpeg-dev
-    pip install pillow-simd
-    pip install kornia timm
+# Create new venv with Python 3.11
+echo "Creating new virtual environment with Python 3.11..."
+uv venv --python 3.11
+
+echo "Virtual environment created successfully!"
+
+# -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+
+# nvdiffrast-hip
+if [ -d "./nvdiffrast-hip" ]; then
+    rm -rf ./nvdiffrast-hip
 fi
 
-if [ "$FLASHATTN" = true ] ; then
-    if [ "$PLATFORM" = "cuda" ] ; then
-        pip install flash-attn==2.7.3
-    elif [ "$PLATFORM" = "hip" ] ; then
-        echo "[FLASHATTN] Prebuilt binaries not found. Building from source..."
-        mkdir -p /tmp/extensions
-        git clone --recursive https://github.com/ROCm/flash-attention.git /tmp/extensions/flash-attention
-        cd /tmp/extensions/flash-attention
-        git checkout tags/v2.7.3-cktile
-        GPU_ARCHS=gfx942 python setup.py install #MI300 series
-        cd $WORKDIR
-    else
-        echo "[FLASHATTN] Unsupported platform: $PLATFORM"
-    fi
+git clone https://github.com/CalebisGross/TRELLIS-AMD ./trellis
+cd ./trellis
+git checkout 2ccf54e8ff7aee0c519d37717bee6d95cf75357e
+mv ./extensions/nvdiffrast-hip/ ../
+cd ..
+rm -rf ./trellis
+cd ./nvdiffrast-hip
+uv pip install . --no-build-isolation
+
+cd ..
+
+# -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+
+# Prepare nvdiffrec with hipify conversion
+if [ -d "./nvdiffrec" ]; then
+    rm -rf ./nvdiffrec
 fi
 
-if [ "$NVDIFFRAST" = true ] ; then
-    if [ "$PLATFORM" = "cuda" ] ; then
-        mkdir -p /tmp/extensions
-        git clone -b v0.4.0 https://github.com/NVlabs/nvdiffrast.git /tmp/extensions/nvdiffrast
-        pip install /tmp/extensions/nvdiffrast --no-build-isolation
-    else
-        echo "[NVDIFFRAST] Unsupported platform: $PLATFORM"
-    fi
+echo "Cloning nvdiffrec repository..."
+git clone -b renderutils https://github.com/JeffreyXiang/nvdiffrec.git
+cd ./nvdiffrec
+
+echo "Converting CUDA code to ROCm using hipify..."
+# Find and convert all CUDA files to HIP
+find . -type f \( -name "*.cu" -o -name "*.cuh" -o -name "*.cpp" -o -name "*.h" \) -exec hipify-perl {} -inplace \;
+
+echo "Applying ROCm-specific fixes..."
+# Fix __shfl_*_sync mask - ROCm requires 64-bit mask instead of 32-bit
+find . -type f \( -name "*.cu" -o -name "*.hip" -o -name "*.cpp" -o -name "*.h" \) -exec sed -i 's/__shfl\([^(]*\)_sync(0xFFFFFFFF,/__shfl\1_sync(0xFFFFFFFFFFFFFFFFULL,/g' {} \;
+
+# Fix incorrect hipify conversion: ATen/cuda/HIPContext.h should be ATen/hip/HIPContext.h
+find . -type f \( -name "*.cpp" -o -name "*.h" \) -exec sed -i 's|ATen/cuda/HIPContext\.h|ATen/hip/HIPContext.h|g' {} \;
+
+# Remove CUDAUtils.h include as it's not needed and not available in ROCm PyTorch
+find . -type f \( -name "*.cpp" -o -name "*.h" \) -exec sed -i 's|#include <ATen/cuda/CUDAUtils\.h>|// #include <ATen/cuda/CUDAUtils.h> // Removed for ROCm|g' {} \;
+
+# Fix getCurrentCUDAStream to getCurrentHIPStream for ROCm
+find . -type f \( -name "*.cpp" -o -name "*.h" \) -exec sed -i 's/at::cuda::getCurrentCUDAStream/at::hip::getCurrentHIPStream/g' {} \;
+
+# Update setup.py to use CppExtension instead of CUDAExtension
+if [ -f "setup.py" ]; then
+    # Change imports
+    sed -i 's/from torch.utils.cpp_extension import BuildExtension, CUDAExtension/from torch.utils.cpp_extension import BuildExtension, CppExtension/g' setup.py
+
+    # Change CUDAExtension to CppExtension
+    sed -i 's/CUDAExtension(/CppExtension(/g' setup.py
+
+    # Add ROCm include path to c_flags (needed for .cpp files that include HIP headers)
+    sed -i "s/c_flags = \['-DNVDR_TORCH'\]/c_flags = ['-DNVDR_TORCH', '-I\/opt\/rocm\/include']/g" setup.py
+
+    # Change nvcc_flags to hipcc_flags (variable name and references)
+    sed -i "s/nvcc_flags = /hipcc_flags = /g" setup.py
+    sed -i "s/nvcc_flags/hipcc_flags/g" setup.py
+
+    # Change 'nvcc': to 'hipcc': in extra_compile_args
+    sed -i "s/'nvcc':/'hipcc':/g" setup.py
+
+    # Fix linker flags for ROCm
+    sed -i "s/'-lcuda', '-lnvrtc'/'-lamdhip64'/g" setup.py
+    sed -i "s/'cuda.lib', 'advapi32.lib', 'nvrtc.lib'/'amdhip64.lib', 'advapi32.lib'/g" setup.py
+
+    # Note: We keep .cu extensions in setup.py even after hipify conversion
+    # The files remain as .cu but contain HIP code, which hipcc can compile
+    # hipify modifies files in-place, so torch_bindings.cpp stays as torch_bindings.cpp
 fi
 
-if [ "$NVDIFFREC" = true ] ; then
-    if [ "$PLATFORM" = "cuda" ] ; then
-        mkdir -p /tmp/extensions
-        git clone -b renderutils https://github.com/JeffreyXiang/nvdiffrec.git /tmp/extensions/nvdiffrec
-        pip install /tmp/extensions/nvdiffrec --no-build-isolation
-    else
-        echo "[NVDIFFREC] Unsupported platform: $PLATFORM"
-    fi
-fi
-
-if [ "$CUMESH" = true ] ; then
-    mkdir -p /tmp/extensions
-    git clone https://github.com/JeffreyXiang/CuMesh.git /tmp/extensions/CuMesh --recursive
-    pip install /tmp/extensions/CuMesh --no-build-isolation
-fi
-
-if [ "$FLEXGEMM" = true ] ; then
-    mkdir -p /tmp/extensions
-    git clone https://github.com/JeffreyXiang/FlexGEMM.git /tmp/extensions/FlexGEMM --recursive
-    pip install /tmp/extensions/FlexGEMM --no-build-isolation
-fi
-
-if [ "$OVOXEL" = true ] ; then
-    mkdir -p /tmp/extensions
-    cp -r o-voxel /tmp/extensions/o-voxel
-    pip install /tmp/extensions/o-voxel --no-build-isolation
-fi
+cd ..
+echo "Installing nvdiffrec..."
+uv pip install ./nvdiffrec --no-build-isolation
