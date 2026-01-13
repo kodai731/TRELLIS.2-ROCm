@@ -210,3 +210,5 @@ __marimo__/
 nvdiffrast-hip
 nvdiffrec
 CuMesh
+o-voxel-hip
+FlexGEMM
