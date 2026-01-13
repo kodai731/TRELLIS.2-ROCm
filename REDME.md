@@ -18,6 +18,9 @@ The script applies patches dynamically:
 - https://github.com/JeffreyXiang/CuMesh.git
 - https://github.com/JeffreyXiang/FlexGEMM.git
 
+Replaced:
+- RMBG-2.0 by https://github.com/plemeri/InSPyReNet (transparent-background)
+
 Original repository: https://github.com/microsoft/TRELLIS.2<br>
 Original README: https://github.com/Mateusz-Dera/TRELLIS.2-ROCm/ORIGINAL_README.md
 

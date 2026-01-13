@@ -1,4 +1,6 @@
+print("[STARTUP] Starting imports...")
 import gradio as gr
+print("[STARTUP] Gradio imported")
 
 import os
 os.environ['OPENCV_IO_ENABLE_OPENEXR'] = '1'
@@ -8,16 +10,32 @@ import shutil
 import cv2
 from typing import *
 import torch
+
+# Disable TF32 for AMD ROCm compatibility (TF32 is NVIDIA-specific)
+torch.backends.cuda.matmul.allow_tf32 = False
+torch.backends.cudnn.allow_tf32 = False
+print("[STARTUP] Basic libraries imported (TF32 disabled for ROCm)")
 import numpy as np
 from PIL import Image
 import base64
 import io
 from trellis2.modules.sparse import SparseTensor
+print("[STARTUP] SparseTensor imported")
 from trellis2.pipelines import Trellis2ImageTo3DPipeline
+print("[STARTUP] Trellis2ImageTo3DPipeline imported")
 from trellis2.renderers import EnvMap
 from trellis2.utils import render_utils
+print("[STARTUP] Trellis2 renderers and utils imported")
 import o_voxel
+print("[STARTUP] o_voxel imported")
 
+# transparent-background for background removal
+from transparent_background import Remover
+print("[STARTUP] transparent_background imported")
+
+# Global variable for background remover
+bg_remover = None
+print("[STARTUP] All imports completed")
 
 MAX_SEED = np.iinfo(np.int32).max
 TMP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'tmp')
@@ -310,15 +328,26 @@ def end_session(req: gr.Request):
 
 def preprocess_image(image: Image.Image) -> Image.Image:
     """
-    Preprocess the input image.
+    Preprocess the input image with background removal using transparent-background.
 
     Args:
         image (Image.Image): The input image.
 
     Returns:
-        Image.Image: The preprocessed image.
+        Image.Image: The preprocessed image with background removed.
     """
-    processed_image = pipeline.preprocess_image(image)
+    global bg_remover
+
+    # Convert to RGB if needed
+    if image.mode != 'RGB':
+        image = image.convert('RGB')
+
+    # Remove background using transparent-background
+    # The Remover.process() method returns a PIL Image with transparent background
+    image_no_bg = bg_remover.process(image)
+
+    # Now use pipeline preprocessing
+    processed_image = pipeline.preprocess_image(image_no_bg)
     return processed_image
 
 
@@ -333,6 +362,8 @@ def pack_state(latents: Tuple[SparseTensor, SparseTensor, int]) -> dict:
     
     
 def unpack_state(state: dict) -> Tuple[SparseTensor, SparseTensor, int]:
+    if state is None:
+        raise ValueError("No 3D model generated yet. Please generate a model first before exporting.")
     shape_slat = SparseTensor(
         feats=torch.from_numpy(state['shape_slat_feats']).cuda(),
         coords=torch.from_numpy(state['coords']).cuda(),
@@ -397,13 +428,28 @@ def image_to_3d(
         }[resolution],
         return_latent=True,
     )
+    print("[DEBUG] Pipeline completed, processing mesh...")
     mesh = outputs[0]
+    print(f"[DEBUG] Mesh vertices: {mesh.vertices.shape}, faces: {mesh.faces.shape}")
+    print(f"[DEBUG] Mesh vertices min/max: {mesh.vertices.min():.3f}/{mesh.vertices.max():.3f}")
+    if hasattr(mesh, 'attrs'):
+        print(f"[DEBUG] Mesh attrs shape: {mesh.attrs.shape if hasattr(mesh.attrs, 'shape') else 'N/A'}")
     mesh.simplify(16777216) # nvdiffrast limit
+    print(f"[DEBUG] After simplify - vertices: {mesh.vertices.shape}, faces: {mesh.faces.shape}")
+    print("[DEBUG] Mesh simplified, rendering snapshot...")
+    print(f"[DEBUG] Envmap type: {type(envmap)}, has data: {envmap is not None}")
     images = render_utils.render_snapshot(mesh, resolution=1024, r=2, fov=36, nviews=STEPS, envmap=envmap)
+    print(f"[DEBUG] Snapshot rendered, image keys: {images.keys()}")
+    # Check render data types and values
+    for key in list(images.keys())[:3]:  # Check first 3 keys
+        if key in images and len(images[key]) > 0:
+            sample = images[key][0]  # First view
+            print(f"[DEBUG] {key} shape: {sample.shape}, dtype: {sample.dtype}, min: {sample.min():.3f}, max: {sample.max():.3f}, mean: {sample.mean():.3f}")
     state = pack_state(latents)
     torch.cuda.empty_cache()
-    
+
     # --- HTML Construction ---
+    print("[DEBUG] Building HTML with rendered images...")
     # The Stack of 48 Images
     images_html = ""
     for m_idx, mode in enumerate(MODES):
@@ -416,7 +462,11 @@ def image_to_3d(
             vis_class = "visible" if is_visible else ""
             
             # Image Source
-            img_base64 = image_to_base64(Image.fromarray(images[mode['render_key']][s_idx]))
+            render_array = images[mode['render_key']][s_idx]
+            # Convert float [0,1] to uint8 [0,255] if needed
+            if render_array.dtype == np.float32 or render_array.dtype == np.float64:
+                render_array = (np.clip(render_array, 0, 1) * 255).astype(np.uint8)
+            img_base64 = image_to_base64(Image.fromarray(render_array))
             
             # Render the Tag
             images_html += f"""
@@ -425,7 +475,8 @@ def image_to_3d(
                      src="{img_base64}" 
                      loading="eager">
             """
-    
+
+    print(f"[DEBUG] Generated {len(images_html)} chars of images HTML")
     # Button Row HTML
     btns_html = ""
     for idx, mode in enumerate(MODES):        
@@ -465,7 +516,9 @@ def image_to_3d(
         </div>
     </div>
     """
-    
+
+    print(f"[DEBUG] HTML complete, length: {len(full_html)} chars")
+    print("[DEBUG] Returning state and HTML to Gradio")
     return state, full_html
 
 
@@ -487,6 +540,9 @@ def extract_glb(
     Returns:
         str: The path to the extracted GLB file.
     """
+    if state is None:
+        raise gr.Error("Please generate a 3D model first before exporting to GLB.")
+
     user_dir = os.path.join(TMP_DIR, str(req.session_hash))
     shape_slat, tex_slat, res = unpack_state(state)
     mesh = pipeline.decode_latent(shape_slat, tex_slat, res)[0]
@@ -616,15 +672,33 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
 
 # Launch the Gradio app
 if __name__ == "__main__":
+    print("[STARTUP] Entering main block")
     os.makedirs(TMP_DIR, exist_ok=True)
+    print("[STARTUP] Created TMP_DIR")
 
     # Construct ui components
+    print("[STARTUP] Loading icon files...")
     btn_img_base64_strs = {}
     for i in range(len(MODES)):
+        print(f"[STARTUP] Loading icon {i}: {MODES[i]['icon']}")
         icon = Image.open(MODES[i]['icon'])
         MODES[i]['icon_base64'] = image_to_base64(icon)
+    print("[STARTUP] All icons loaded")
 
+    # Load transparent-background for background removal BEFORE pipeline
+    print("Loading transparent-background model for background removal...")
+    # Use default ckpt path (auto-downloads if needed)
+    bg_remover = Remover(mode='base', jit=False, device='cuda:0')
+    print("Background remover loaded successfully!")
+
+    # Load pipeline but replace rembg_model to avoid briaai/RMBG-2.0
+    print("Loading TRELLIS.2-4B pipeline...")
     pipeline = Trellis2ImageTo3DPipeline.from_pretrained('microsoft/TRELLIS.2-4B')
+
+    # Replace the rembg_model with None since we handle background removal ourselves
+    pipeline.rembg_model = None
+    print("Replaced pipeline rembg_model with custom background remover")
+
     pipeline.cuda()
     
     envmap = {
