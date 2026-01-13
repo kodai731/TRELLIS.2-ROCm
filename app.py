@@ -428,28 +428,13 @@ def image_to_3d(
         }[resolution],
         return_latent=True,
     )
-    print("[DEBUG] Pipeline completed, processing mesh...")
     mesh = outputs[0]
-    print(f"[DEBUG] Mesh vertices: {mesh.vertices.shape}, faces: {mesh.faces.shape}")
-    print(f"[DEBUG] Mesh vertices min/max: {mesh.vertices.min():.3f}/{mesh.vertices.max():.3f}")
-    if hasattr(mesh, 'attrs'):
-        print(f"[DEBUG] Mesh attrs shape: {mesh.attrs.shape if hasattr(mesh.attrs, 'shape') else 'N/A'}")
     mesh.simplify(16777216) # nvdiffrast limit
-    print(f"[DEBUG] After simplify - vertices: {mesh.vertices.shape}, faces: {mesh.faces.shape}")
-    print("[DEBUG] Mesh simplified, rendering snapshot...")
-    print(f"[DEBUG] Envmap type: {type(envmap)}, has data: {envmap is not None}")
     images = render_utils.render_snapshot(mesh, resolution=1024, r=2, fov=36, nviews=STEPS, envmap=envmap)
-    print(f"[DEBUG] Snapshot rendered, image keys: {images.keys()}")
-    # Check render data types and values
-    for key in list(images.keys())[:3]:  # Check first 3 keys
-        if key in images and len(images[key]) > 0:
-            sample = images[key][0]  # First view
-            print(f"[DEBUG] {key} shape: {sample.shape}, dtype: {sample.dtype}, min: {sample.min():.3f}, max: {sample.max():.3f}, mean: {sample.mean():.3f}")
     state = pack_state(latents)
     torch.cuda.empty_cache()
-
+    
     # --- HTML Construction ---
-    print("[DEBUG] Building HTML with rendered images...")
     # The Stack of 48 Images
     images_html = ""
     for m_idx, mode in enumerate(MODES):
@@ -462,11 +447,7 @@ def image_to_3d(
             vis_class = "visible" if is_visible else ""
             
             # Image Source
-            render_array = images[mode['render_key']][s_idx]
-            # Convert float [0,1] to uint8 [0,255] if needed
-            if render_array.dtype == np.float32 or render_array.dtype == np.float64:
-                render_array = (np.clip(render_array, 0, 1) * 255).astype(np.uint8)
-            img_base64 = image_to_base64(Image.fromarray(render_array))
+            img_base64 = image_to_base64(Image.fromarray(images[mode['render_key']][s_idx]))
             
             # Render the Tag
             images_html += f"""
@@ -475,8 +456,7 @@ def image_to_3d(
                      src="{img_base64}" 
                      loading="eager">
             """
-
-    print(f"[DEBUG] Generated {len(images_html)} chars of images HTML")
+    
     # Button Row HTML
     btns_html = ""
     for idx, mode in enumerate(MODES):        
@@ -516,9 +496,7 @@ def image_to_3d(
         </div>
     </div>
     """
-
-    print(f"[DEBUG] HTML complete, length: {len(full_html)} chars")
-    print("[DEBUG] Returning state and HTML to Gradio")
+    
     return state, full_html
 
 

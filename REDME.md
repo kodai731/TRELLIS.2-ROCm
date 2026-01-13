@@ -1,9 +1,6 @@
 # TRELLIS.2-ROCm
 
 ## Info:
-
-Work in progress!
-
 ![ROCm](https://img.shields.io/badge/ROCm-7.1.1-red.svg)
 
 This is a fork of TRELLIS.2 that enables running 3D model generation on AMD GPUs using ROCm.<br>
@@ -22,10 +19,10 @@ Replaced:
 - RMBG-2.0 by https://github.com/plemeri/InSPyReNet (transparent-background)
 
 Original repository: https://github.com/microsoft/TRELLIS.2<br>
-Original README: https://github.com/Mateusz-Dera/TRELLIS.2-ROCm/ORIGINAL_README.md
+Original README: https://github.com/Mateusz-Dera/TRELLIS.2-ROCm/blob/main/ORGINAL_README.md
 
 > [!Note]
-> The preview does not work, but the file should export normally.
+> Core model generation is functional, but I'm in the process of replacing certain modules. Consequently, features such as the model preview are currently unavailable.
 
 ### Test platform:
 |Name|Info|
@@ -38,6 +35,7 @@ Original README: https://github.com/Mateusz-Dera/TRELLIS.2-ROCm/ORIGINAL_README.
 |Kernel|6.12.57+deb13-amd64|
 
 ## Instalation:
+
 1\. Install <b>uv</b>:
 ```bash
 sudo apt -y install pipx
@@ -57,4 +55,16 @@ export PYTORCH_ROCM_ARCH="gfx1100" # RADEON 7900 XTX
 3\. Run setup.sh:
 ```bash
 bash ./setup.sh
+```
+
+## After installation:
+1\. Aktywuj venv<br>
+2\. Go to https://huggingface.co/facebook/dinov3-vitl16-pretrain-lvd1689m<br>
+3\. Click “Agree and access repository” to accept the license.<br>
+4\. Activate your Hugging Face token in the terminal.<br>
+
+## Run app:
+```bash
+source .venv/bin/activate
+python ./app.py
 ```

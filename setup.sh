@@ -27,6 +27,24 @@ echo "Virtual environment created successfully!"
 
 # -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
 
+source .venv/bin/activate
+
+# Activate venv and install PyTorch with ROCm 6.4
+echo "Installing PyTorch with ROCm 6.4 support..."
+source .venv/bin/activate
+uv pip install torch torchvision --index-url https://download.pytorch.org/whl/rocm6.4
+
+echo "Installing additional dependencies..."
+uv pip install imageio imageio-ffmpeg tqdm easydict opencv-python-headless ninja trimesh transformers gradio==6.0.1 tensorboard pandas lpips zstandard
+uv pip install git+https://github.com/EasternJournalist/utils3d.git@9a4eb15e4021b67b12c460c7057d642626897ec8
+uv pip install pillow-simd
+uv pip install kornia timm
+uv pip install flash-attn==2.8.3
+
+echo "Dependencies installed successfully!"
+
+# -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+
 # nvdiffrast-hip
 if [ -d "./nvdiffrast-hip" ]; then
     rm -rf ./nvdiffrast-hip
@@ -260,3 +278,87 @@ echo "Installing FlexGEMM..."
 uv pip install ./FlexGEMM --no-build-isolation
 
 # -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+
+# o-voxel with hipify conversion
+if [ -d "./o-voxel-hip" ]; then
+    rm -rf ./o-voxel-hip
+fi
+
+echo "Copying o-voxel to o-voxel-hip..."
+cp -r ./o-voxel ./o-voxel-hip
+cd ./o-voxel-hip
+
+echo "Converting CUDA code to ROCm using hipify..."
+# Hipify main sources
+find src -type f \( -name "*.cu" -o -name "*.cpp" -o -name "*.cuh" -o -name "*.h" \) | xargs -I {} hipify-perl {} -inplace
+
+echo "Applying ROCm-specific fixes to o-voxel..."
+# Fix __shfl_*_sync mask - ROCm requires 64-bit mask
+find . -type f \( -name "*.cu" -o -name "*.hip" -o -name "*.cpp" -o -name "*.h" -o -name "*.cuh" \) -exec sed -i 's/__shfl\([^(]*\)_sync(0xFFFFFFFF,/__shfl\1_sync(0xFFFFFFFFFFFFFFFFULL,/g' {} \;
+
+# Fix HIPContext includes
+find . -type f \( -name "*.cpp" -o -name "*.h" \) -exec sed -i 's|ATen/cuda/HIPContext\.h|ATen/hip/HIPContext.h|g' {} \;
+
+# Remove CUDAUtils includes
+find . -type f \( -name "*.cpp" -o -name "*.h" \) -exec sed -i 's|#include <ATen/cuda/CUDAUtils\.h>|// #include <ATen/cuda/CUDAUtils.h> // Removed for ROCm|g' {} \;
+
+# Fix stream API
+find . -type f \( -name "*.cpp" -o -name "*.h" \) -exec sed -i 's/at::cuda::getCurrentCUDAStream/at::hip::getCurrentHIPStream/g' {} \;
+
+# Remove local struct definitions that conflict with HIP types
+# HIP already provides float3, int3, int4 but NOT bool3
+sed -i '/^struct float3 {float x, y, z;/d' src/convert/flexible_dual_grid.cpp
+sed -i '/^struct int3 {int x, y, z;/d' src/convert/flexible_dual_grid.cpp
+sed -i '/^struct int4 {int x, y, z, w;/d' src/convert/flexible_dual_grid.cpp
+# Keep bool3 as it's not provided by HIP
+
+# Update setup.py to use CppExtension instead of CUDAExtension
+if [ -f "setup.py" ]; then
+    # Change CUDAExtension to CppExtension
+    sed -i 's/from torch.utils.cpp_extension import CUDAExtension, BuildExtension, IS_HIP_EXTENSION/from torch.utils.cpp_extension import CppExtension, BuildExtension, IS_HIP_EXTENSION/g' setup.py
+    sed -i 's/CUDAExtension(/CppExtension(/g' setup.py
+
+    # Change nvcc to hipcc in extra_compile_args
+    sed -i 's/"nvcc":/"hipcc":/g' setup.py
+
+    # Add ROCm include path and Eigen path for C++ files
+    # Use Python to dynamically insert the path
+    python3 << 'PYTHON_SCRIPT'
+import re
+with open('setup.py', 'r') as f:
+    content = f.read()
+
+# Replace cxx flags
+content = re.sub(
+    r'"cxx": \["-O3", "-std=c\+\+17"\]',
+    '"cxx": ["-I/opt/rocm/include", f"-I{os.path.join(ROOT, \'third_party/eigen\')}", "-O3", "-std=c++17"]',
+    content
+)
+
+with open('setup.py', 'w') as f:
+    f.write(content)
+PYTHON_SCRIPT
+fi
+
+# Download Eigen if not present
+if [ ! -d "third_party/eigen" ] || [ -z "$(ls -A third_party/eigen 2>/dev/null)" ]; then
+    echo "Downloading Eigen library..."
+    mkdir -p third_party
+    rm -rf third_party/eigen
+    git clone --depth 1 https://gitlab.com/libeigen/eigen.git third_party/eigen
+fi
+
+# Update pyproject.toml to use local CuMesh and FlexGEMM
+if [ -f "pyproject.toml" ]; then
+    # Comment out git dependencies - we'll use already installed local versions
+    sed -i 's|"cumesh @ git+https://github.com/JeffreyXiang/CuMesh.git",|# "cumesh @ git+https://github.com/JeffreyXiang/CuMesh.git",  # Use locally installed version|g' pyproject.toml
+    sed -i 's|"flex_gemm @ git+https://github.com/JeffreyXiang/FlexGEMM.git",|# "flex_gemm @ git+https://github.com/JeffreyXiang/FlexGEMM.git",  # Use locally installed version|g' pyproject.toml
+fi
+
+cd ..
+echo "Installing o-voxel-hip..."
+uv pip install ./o-voxel-hip --no-build-isolation
+
+# -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+
+uv pip install transparent-background
