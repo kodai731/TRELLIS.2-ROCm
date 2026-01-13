@@ -101,3 +101,162 @@ fi
 cd ..
 echo "Installing nvdiffrec..."
 uv pip install ./nvdiffrec --no-build-isolation
+
+# -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+
+# CuMesh with hipify conversion
+if [ -d "./CuMesh" ]; then
+    rm -rf ./CuMesh
+fi
+
+echo "Cloning CuMesh repository..."
+git clone https://github.com/JeffreyXiang/CuMesh.git --recursive
+cd ./CuMesh
+
+echo "Converting CUDA code to ROCm using hipify..."
+# Hipify main sources
+find src -name "*.cu" -o -name "*.cpp" | xargs -I {} hipify-perl {} -inplace
+# Hipify cubvh sources
+find third_party/cubvh/src -name "*.cu" -o -name "*.cpp" | xargs -I {} hipify-perl {} -inplace
+# Hipify headers (exclude Eigen - it already supports HIP)
+find . -name "*.cuh" -o -name "*.h" | grep -v ".prehip" | grep -v "third_party/cubvh/third_party/eigen" | xargs -I {} hipify-perl {} -inplace
+
+echo "Applying ROCm-specific fixes..."
+# Fix __shfl_*_sync mask - ROCm requires 64-bit mask
+find . -type f \( -name "*.cu" -o -name "*.hip" -o -name "*.cpp" -o -name "*.h" -o -name "*.cuh" \) -exec sed -i 's/__shfl\([^(]*\)_sync(0xFFFFFFFF,/__shfl\1_sync(0xFFFFFFFFFFFFFFFFULL,/g' {} \;
+
+# Fix HIPContext includes
+find . -type f \( -name "*.cpp" -o -name "*.h" \) -exec sed -i 's|ATen/cuda/HIPContext\.h|ATen/hip/HIPContext.h|g' {} \;
+
+# Remove CUDAUtils includes
+find . -type f \( -name "*.cpp" -o -name "*.h" \) -exec sed -i 's|#include <ATen/cuda/CUDAUtils\.h>|// #include <ATen/cuda/CUDAUtils.h> // Removed for ROCm|g' {} \;
+
+# Fix stream API
+find . -type f \( -name "*.cpp" -o -name "*.h" \) -exec sed -i 's/at::cuda::getCurrentCUDAStream/at::hip::getCurrentHIPStream/g' {} \;
+
+# Fix cuda::std namespace to std (thrust doesn't have tuple in ROCm)
+sed -i 's/::cuda::std::/::std::/g' src/clean_up.cu
+
+# Apply comprehensive fix to clean_up.cu for ROCm compatibility
+echo "Applying ROCm compatibility fixes to clean_up.cu..."
+
+# Add thrust includes after hipcub include
+sed -i '/#include <hipcub\/hipcub.hpp>/a #include <thrust/sort.h>\n#include <thrust/device_ptr.h>' src/clean_up.cu
+
+# Replace int3_decomposer with int3_comparator
+sed -i '/struct int3_decomposer/,/^};/c\
+// Comparator for int3 to sort lexicographically (x, y, z)\
+struct int3_comparator\
+{\
+    __host__ __device__ bool operator()(const int3\& a, const int3\& b) const\
+    {\
+        if (a.x != b.x) return a.x < b.x;\
+        if (a.y != b.y) return a.y < b.y;\
+        return a.z < b.z;\
+    }\
+};' src/clean_up.cu
+
+# Use Python to replace DeviceRadixSort with thrust (handles multiline better)
+python3 << 'PYTHON_SCRIPT'
+import re
+
+with open('src/clean_up.cu', 'r') as f:
+    content = f.read()
+
+# Pattern to match the two DeviceRadixSort calls plus the resize between them
+pattern = r'    CUDA_CHECK\(hipcub::DeviceRadixSort::SortPairs\(\s*nullptr,.*?\)\);\s*this->cub_temp_storage\.resize\(temp_storage_bytes\);\s*CUDA_CHECK\(hipcub::DeviceRadixSort::SortPairs\(.*?int3_decomposer\{\}\s*\)\);'
+
+replacement = '''    // Use thrust::sort_by_key instead of hipcub with decomposer (not supported in ROCm)
+    CUDA_CHECK(hipMemcpy(cu_sorted_faces_output, cu_sorted_faces, F * sizeof(int3), hipMemcpyDeviceToDevice));
+    CUDA_CHECK(hipMemcpy(cu_sorted_indices_output, cu_sorted_face_indices, F * sizeof(int), hipMemcpyDeviceToDevice));
+
+    thrust::device_ptr<int3> faces_ptr(cu_sorted_faces_output);
+    thrust::device_ptr<int> indices_ptr(cu_sorted_indices_output);
+    thrust::sort_by_key(faces_ptr, faces_ptr + F, indices_ptr, int3_comparator());
+
+    CUDA_CHECK(hipDeviceSynchronize());'''
+
+content = re.sub(pattern, replacement, content, flags=re.DOTALL)
+
+with open('src/clean_up.cu', 'w') as f:
+    f.write(content)
+PYTHON_SCRIPT
+
+# Add __host__ to Vec3f constructors for host-side compatibility (both declarations and implementations)
+# Fix declarations in class
+sed -i 's/__device__ __forceinline__ Vec3f();/__host__ __device__ __forceinline__ Vec3f();/g' src/dtypes.cuh
+sed -i 's/__device__ __forceinline__ Vec3f(float x, float y, float z);/__host__ __device__ __forceinline__ Vec3f(float x, float y, float z);/g' src/dtypes.cuh
+sed -i 's/__device__ __forceinline__ Vec3f(float3 v);/__host__ __device__ __forceinline__ Vec3f(float3 v);/g' src/dtypes.cuh
+# Fix implementations
+sed -i 's/__device__ __forceinline__ Vec3f::Vec3f/__host__ __device__ __forceinline__ Vec3f::Vec3f/g' src/dtypes.cuh
+
+# Update CuMesh setup.py
+if [ -f "setup.py" ]; then
+    # Change CUDAExtension to CppExtension
+    sed -i 's/from torch.utils.cpp_extension import CUDAExtension, BuildExtension, IS_HIP_EXTENSION/from torch.utils.cpp_extension import CppExtension, BuildExtension, IS_HIP_EXTENSION/g' setup.py
+    sed -i 's/CUDAExtension(/CppExtension(/g' setup.py
+
+    # Change nvcc to hipcc in extra_compile_args
+    sed -i 's/"nvcc":/"hipcc":/g' setup.py
+
+    # Add ROCm include path for C++ files
+    sed -i 's/"cxx": \["-O3", "-std=c++17"\]/"cxx": ["-O3", "-std=c++17", "-I\/opt\/rocm\/include"]/g' setup.py
+fi
+
+# Update cubvh setup.py
+if [ -f "third_party/cubvh/setup.py" ]; then
+    sed -i 's/from torch.utils.cpp_extension import BuildExtension, CUDAExtension/from torch.utils.cpp_extension import BuildExtension, CppExtension/g' third_party/cubvh/setup.py
+    sed -i 's/CUDAExtension(/CppExtension(/g' third_party/cubvh/setup.py
+    sed -i "s/'nvcc':/'hipcc':/g" third_party/cubvh/setup.py
+fi
+
+# Fix Eigen for HIP in cubvh
+echo "Fixing Eigen for ROCm/HIP compatibility..."
+# Fix Eigen Core to detect HIP using __HIP_PLATFORM_AMD__
+if [ -f "third_party/cubvh/third_party/eigen/Eigen/Core" ]; then
+    sed -i 's|#if defined(EIGEN_CUDACC)|#if defined(__HIPCC__) \|\| defined(__HIP_PLATFORM_AMD__)\
+#include <hip/hip_runtime.h>\
+#elif defined(EIGEN_CUDACC)|g' third_party/cubvh/third_party/eigen/Eigen/Core
+fi
+
+# Fix Eigen Meta.h to use correct HIP math constants path
+if [ -f "third_party/cubvh/third_party/eigen/Eigen/src/Core/util/Meta.h" ]; then
+    sed -i 's|#include "Eigen/src/Core/arch/HIP/hcc/hip/hip_math_constants.h"|#include <hip/hip_math_constants.h>|g' third_party/cubvh/third_party/eigen/Eigen/src/Core/util/Meta.h
+fi
+
+# Fix cubvh thrust and stream APIs
+echo "Fixing cubvh thrust and stream APIs..."
+find third_party/cubvh -type f \( -name "*.cu" -o -name "*.cpp" -o -name "*.h" -o -name "*.cuh" \) -exec sed -i 's/thrust::cuda::/thrust::hip::/g' {} \;
+find third_party/cubvh -type f \( -name "*.cu" -o -name "*.cpp" -o -name "*.h" -o -name "*.cuh" \) -exec sed -i 's/at::cuda::getCurrentCUDAStream/at::hip::getCurrentHIPStream/g' {} \;
+
+cd ..
+echo "Installing CuMesh..."
+uv pip install ./CuMesh --no-build-isolation
+
+# -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+
+# FlexGEMM with hipify conversion
+if [ -d "./FlexGEMM" ]; then
+    rm -rf ./FlexGEMM
+fi
+
+echo "Cloning FlexGEMM repository..."
+git clone https://github.com/JeffreyXiang/FlexGEMM.git
+cd ./FlexGEMM
+
+echo "Converting CUDA code to ROCm using hipify..."
+find flex_gemm/kernels/cuda -type f \( -name "*.cu" -o -name "*.cpp" -o -name "*.cuh" -o -name "*.h" \) | xargs -I {} hipify-perl {} -inplace
+
+echo "Applying ROCm-specific fixes to FlexGEMM..."
+# Update setup.py to use CppExtension instead of CUDAExtension
+if [ -f "setup.py" ]; then
+    sed -i 's/from torch.utils.cpp_extension import CUDAExtension, BuildExtension/from torch.utils.cpp_extension import CppExtension, BuildExtension/g' setup.py
+    sed -i 's/CUDAExtension(/CppExtension(/g' setup.py
+    sed -i 's/"nvcc":/"hipcc":/g' setup.py
+fi
+
+cd ..
+echo "Installing FlexGEMM..."
+uv pip install ./FlexGEMM --no-build-isolation
+
+# -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-

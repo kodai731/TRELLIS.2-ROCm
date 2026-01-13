@@ -11,6 +11,11 @@ If you want a reliable test environment, it is recommended to use a Podman conta
 
 The script uses <b>nvdiffrast-hip</b> from https://github.com/CalebisGross/TRELLIS-AMD
 
+The script applies patches dynamically:
+- https://github.com/JeffreyXiang/nvdiffrec.git
+- https://github.com/JeffreyXiang/CuMesh.git
+- https://github.com/JeffreyXiang/FlexGEMM.git
+
 Original repository: https://github.com/microsoft/TRELLIS.2<br>
 Original README: https://github.com/Mateusz-Dera/TRELLIS.2-ROCm/ORIGINAL_README.md
 
@@ -37,7 +42,7 @@ pipx install uv
 ```bash
 sudo apt install -y libjpeg-dev
 ```
-3\. Set the GPU architecture:
+3\. Set the GPU architecture (If you are not using Podman):
 ```bash
 export ROCM_PATH="/opt/rocm"
 export HSA_OVERRIDE_GFX_VERSION="11.0.0" # RADEON 7900 XTX

@@ -209,3 +209,4 @@ __marimo__/
 # ROCm
 nvdiffrast-hip
 nvdiffrec
+CuMesh
