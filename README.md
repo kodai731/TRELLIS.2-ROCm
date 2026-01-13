@@ -58,7 +58,7 @@ bash ./setup.sh
 ```
 
 ## After installation:
-1\. Aktywuj venv<br>
+1\. Activate venv<br>
 2\. Go to https://huggingface.co/facebook/dinov3-vitl16-pretrain-lvd1689m<br>
 3\. Click “Agree and access repository” to accept the license.<br>
 4\. Activate your Hugging Face token in the terminal.<br>
