@@ -39,7 +39,7 @@ uv pip install imageio imageio-ffmpeg tqdm easydict opencv-python-headless ninja
 uv pip install git+https://github.com/EasternJournalist/utils3d.git@9a4eb15e4021b67b12c460c7057d642626897ec8
 uv pip install pillow-simd
 uv pip install kornia timm
-uv pip install flash-attn==2.8.3
+uv pip install flash-attn==2.8.3 --no-build-isolation
 
 echo "Dependencies installed successfully!"
 
