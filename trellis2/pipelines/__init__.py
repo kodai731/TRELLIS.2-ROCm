@@ -42,7 +42,8 @@ def from_pretrained(path: str):
 
     with open(config_file, 'r') as f:
         config = json.load(f)
-    return globals()[config['name']].from_pretrained(path)
+    pipeline_cls = __getattr__(config['name'])
+    return pipeline_cls.from_pretrained(path)
 
 
 # For PyLance

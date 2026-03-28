@@ -11,6 +11,126 @@ import nvdiffrast.torch as dr
 import cumesh
 
 
+def _rasterize_uv(
+    out_uvs: torch.Tensor,
+    out_faces: torch.Tensor,
+    out_vertices: torch.Tensor,
+    texture_size: int,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Rasterize triangles in UV space and interpolate vertex positions.
+    Pure PyTorch replacement for nvdiffrast dr.rasterize + dr.interpolate.
+
+    Args:
+        out_uvs: (V, 2) UV coordinates in [0, 1]
+        out_faces: (F, 3) triangle vertex indices (int32)
+        out_vertices: (V, 3) vertex positions
+        texture_size: output texture resolution (square)
+
+    Returns:
+        mask: (H, W) bool tensor of covered texels
+        pos_map: (H, W, 3) interpolated 3D positions for each texel
+    """
+    device = out_uvs.device
+    H = W = texture_size
+    F_count = out_faces.shape[0]
+
+    mask = torch.zeros(H, W, dtype=torch.bool, device=device)
+    pos_map = torch.zeros(H, W, 3, dtype=torch.float32, device=device)
+
+    uv_px = out_uvs.float() * texture_size
+    tri_uvs = uv_px[out_faces.long()]
+    tri_verts = out_vertices[out_faces.long()]
+
+    lo = tri_uvs.min(dim=1).values.floor().long().clamp(min=0)
+    hi = tri_uvs.max(dim=1).values.ceil().long().clamp(max=texture_size - 1)
+
+    bbox_w = (hi[:, 0] - lo[:, 0] + 1).clamp(min=0)
+    bbox_h = (hi[:, 1] - lo[:, 1] + 1).clamp(min=0)
+
+    d10 = tri_uvs[:, 1] - tri_uvs[:, 0]
+    d20 = tri_uvs[:, 2] - tri_uvs[:, 0]
+    area = d10[:, 0] * d20[:, 1] - d10[:, 1] * d20[:, 0]
+
+    CHUNK = 512
+    MAX_BATCH_PIXELS = 4 * 1024 * 1024
+
+    for start in range(0, F_count, CHUNK):
+        end = min(start + CHUNK, F_count)
+        B = end - start
+
+        b_area = area[start:end]
+        b_valid = b_area.abs() > 1e-10
+        if not b_valid.any():
+            continue
+
+        b_lo = lo[start:end]
+        max_w = bbox_w[start:end].max().item()
+        max_h = bbox_h[start:end].max().item()
+
+        if max_w <= 0 or max_h <= 0:
+            continue
+
+        sub_chunk = max(1, min(B, MAX_BATCH_PIXELS // max(1, max_w * max_h)))
+
+        for sub_s in range(0, B, sub_chunk):
+            sub_e = min(sub_s + sub_chunk, B)
+            a_s = start + sub_s
+            a_e = start + sub_e
+            SB = sub_e - sub_s
+
+            s_lo = lo[a_s:a_e]
+            s_valid = b_valid[sub_s:sub_e]
+
+            offx = torch.arange(max_w, device=device).float() + 0.5
+            offy = torch.arange(max_h, device=device).float() + 0.5
+            gx, gy = torch.meshgrid(offx, offy, indexing='xy')
+
+            px = gx.unsqueeze(0) + s_lo[:, 0].view(SB, 1, 1).float()
+            py = gy.unsqueeze(0) + s_lo[:, 1].view(SB, 1, 1).float()
+
+            v0x = tri_uvs[a_s:a_e, 0, 0].view(SB, 1, 1)
+            v0y = tri_uvs[a_s:a_e, 0, 1].view(SB, 1, 1)
+            d10x = d10[a_s:a_e, 0].view(SB, 1, 1)
+            d10y = d10[a_s:a_e, 1].view(SB, 1, 1)
+            d20x = d20[a_s:a_e, 0].view(SB, 1, 1)
+            d20y = d20[a_s:a_e, 1].view(SB, 1, 1)
+            a_val = area[a_s:a_e].view(SB, 1, 1)
+
+            dpx = px - v0x
+            dpy = py - v0y
+            u = (dpx * d20y - dpy * d20x) / (a_val + 1e-20)
+            v = (d10x * dpy - d10y * dpx) / (a_val + 1e-20)
+            w_bary = 1.0 - u - v
+
+            inside = (u >= -1e-5) & (v >= -1e-5) & (w_bary >= -1e-5)
+            inside = inside & s_valid.view(SB, 1, 1)
+            inside = inside & (px >= 0) & (px < W) & (py >= 0) & (py < H)
+
+            if not inside.any():
+                continue
+
+            bi, ri, ci = inside.nonzero(as_tuple=True)
+            ix = px[bi, ri, ci].long()
+            iy = py[bi, ri, ci].long()
+
+            u_val = u[bi, ri, ci].unsqueeze(-1)
+            v_val = v[bi, ri, ci].unsqueeze(-1)
+            w_val = w_bary[bi, ri, ci].unsqueeze(-1)
+
+            abs_bi = a_s + bi
+            interp = (
+                w_val * tri_verts[abs_bi, 0]
+                + u_val * tri_verts[abs_bi, 1]
+                + v_val * tri_verts[abs_bi, 2]
+            )
+
+            pos_map[iy, ix] = interp
+            mask[iy, ix] = True
+
+    return mask, pos_map
+
+
 def to_glb(
     vertices: torch.Tensor,
     faces: torch.Tensor,
@@ -26,8 +146,8 @@ def to_glb(
     remesh_band: float = 1,
     remesh_project: float = 0.9,
     mesh_cluster_threshold_cone_half_angle_rad=np.radians(90.0),
-    mesh_cluster_refine_iterations=0,
-    mesh_cluster_global_iterations=1,
+    mesh_cluster_refine_iterations=100,
+    mesh_cluster_global_iterations=3,
     mesh_cluster_smooth_strength=1,
     verbose: bool = False,
     use_tqdm: bool = False,
@@ -226,26 +346,20 @@ def to_glb(
     if verbose:
         print("Sampling attributes...", end='', flush=True)
         
-    # Setup differentiable rasterizer context
     ctx = dr.RasterizeCudaContext()
-    # Prepare UV coordinates for rasterization (rendering in UV space)
     uvs_rast = torch.cat([out_uvs * 2 - 1, torch.zeros_like(out_uvs[:, :1]), torch.ones_like(out_uvs[:, :1])], dim=-1).unsqueeze(0)
     rast = torch.zeros((1, texture_size, texture_size, 4), device='cuda', dtype=torch.float32)
-    
-    # Rasterize in chunks to save memory
+
     for i in range(0, out_faces.shape[0], 100000):
         rast_chunk, _ = dr.rasterize(
             ctx, uvs_rast, out_faces[i:i+100000],
             resolution=[texture_size, texture_size],
         )
         mask_chunk = rast_chunk[..., 3:4] > 0
-        rast_chunk[..., 3:4] += i # Store face ID in alpha channel
+        rast_chunk[..., 3:4] += i
         rast = torch.where(mask_chunk, rast_chunk, rast)
-    
-    # Mask of valid pixels in texture
+
     mask = rast[0, ..., 3] > 0
-    
-    # Interpolate 3D positions in UV space (finding 3D coord for every texel)
     pos = dr.interpolate(out_vertices.unsqueeze(0), rast, out_faces)[0][0]
     valid_pos = pos[mask]
     
